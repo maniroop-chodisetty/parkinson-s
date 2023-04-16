@@ -1,0 +1,88 @@
+!pip install scikit-learn-intelex --progress-bar off >> /tmp/pip_sklearnex.log
+import pandas as pd
+import numpy as np
+from sklearnex import patch_sklearn
+patch_sklearn()
+from sklearn import *
+import glob
+
+p = '/kaggle/input/tlvmc-parkinsons-freezing-gait-prediction/'
+
+training = glob.glob(p+'train/**/**')
+testing = glob.glob(p+'test/**/**')
+subjects = pd.read_csv(p+'subjects.csv')
+tasks = pd.read_csv(p+'tasks.csv')
+submission = pd.read_csv(p+'sample_submission.csv')
+
+tasks['Duration'] = tasks['End'] - tasks['Begin']
+tasks = pd.pivot_table(tasks, values=['Duration'], index=['Id'], columns=['Task'], aggfunc='sum', fill_value=0)
+tasks.columns = [c[-1] for c in tasks.columns]
+tasks = tasks.reset_index()
+tasks['t_kmeans'] = cluster.KMeans(n_clusters=10, random_state=3).fit_predict(tasks[tasks.columns[1:]])
+
+subjects = subjects.fillna(0).groupby('Subject').median()
+subjects = subjects.reset_index()
+subjects.rename(columns={'Subject':'Id'}, inplace=True)
+subjects['s_kmeans'] = cluster.KMeans(n_clusters=10, random_state=3).fit_predict(subjects[subjects.columns[1:]])
+
+def reader(f):
+    try:
+        df = pd.read_csv(f, usecols=['Time', 'AccV', 'AccML', 'AccAP', 'StartHesitation', 'Turn' , 'Walking'])
+        df['Id'] = f.split('/')[-1].split('.')[0]
+        #df = pd.merge(df, tasks[['Id','t_kmeans']], how='left', on='Id').fillna(-1)
+        #df = pd.merge(df, subjects[['Id','s_kmeans']], how='left', on='Id').fillna(-1)
+        df['AccV2'] = df['AccV'] - np.median(df['AccV'])
+        df['AccML2'] = df['AccML'] - np.median(df['AccML'])
+        df['AccAP2'] = df['AccAP'] - np.median(df['AccAP'])
+        
+        df['AccV2_s'] = df['AccV'] - df['AccV'].shift(1)
+        df['AccML2_s'] = df['AccML'] - df['AccML'].shift(1)
+        df['AccAP2_s'] = df['AccAP'] - df['AccAP'].shift(1)
+    
+        df['AccV2_sm'] = df['AccV'] - df['AccV'].shift(1).rolling(5).mean()
+        df['AccML2_sm'] = df['AccML'] - df['AccML'].shift(1).rolling(5).mean()
+        df['AccAP2_sm'] = df['AccAP'] - df['AccAP'].shift(1).rolling(5).mean()
+        
+        df = df.fillna(99)
+        return df
+    except: pass
+training = pd.concat([reader(f) for f in training]).fillna(0); print(training.shape)
+cols = [c for c in training.columns if c not in ['Id', 'StartHesitation', 'Turn' , 'Walking', 'Valid', 'Task','Event']]
+pcols = ['StartHesitation', 'Turn' , 'Walking']
+scols = ['Id', 'StartHesitation', 'Turn' , 'Walking']
+
+x1, x2, y1, y2 = model_selection.train_test_split(training[cols], training[pcols], test_size=.30, random_state=3, stratify=training[pcols])
+del training
+reg = ensemble.ExtraTreesRegressor(n_estimators=200, max_depth=7, n_jobs=-1, random_state=3)
+reg.fit(x1[:5_000_000],y1[:5_000_000])
+print(metrics.average_precision_score(y2, reg.predict(x2).clip(0.0,1.0)))
+
+
+submission['t'] = 0
+submission_final = []
+for f in testing:
+    df = pd.read_csv(f)
+    df['Id'] = f.split('/')[-1].split('.')[0]
+    df = df.fillna(0).reset_index(drop=True)
+    #df = pd.merge(df, tasks[['Id','t_kmeans']], how='left', on='Id').fillna(-1)
+    #df = pd.merge(df, subjects[['Id','s_kmeans']], how='left', on='Id').fillna(-1)
+    df['AccV2'] = df['AccV'] - np.median(df['AccV'])
+    df['AccML2'] = df['AccML'] - np.median(df['AccML'])
+    df['AccAP2'] = df['AccAP'] - np.median(df['AccAP'])
+    df['AccV2_s'] = df['AccV'] - df['AccV'].shift(1)
+    df['AccML2_s'] = df['AccML'] - df['AccML'].shift(1)
+    df['AccAP2_s'] = df['AccAP'] - df['AccAP'].shift(1)
+    df['AccV2_sm'] = df['AccV'] - df['AccV'].shift(1).rolling(5).mean()
+    df['AccML2_sm'] = df['AccML'] - df['AccML'].shift(1).rolling(5).mean()
+    df['AccAP2_sm'] = df['AccAP'] - df['AccAP'].shift(1).rolling(5).mean()
+    df = df.fillna(99)
+    res = pd.DataFrame(reg.predict(df[cols]).clip(0.0,1.0), columns=pcols)
+    df = pd.concat([df,res], axis=1)
+    df['Id'] = df['Id'].astype(str) + '_' + df['Time'].astype(str)
+    submission_final.append(df[scols])
+submission_final = pd.concat(submission_final)
+submission_final = pd.merge(submission[['Id','t']], submission_final, how='left', on='Id').fillna(0.0)
+submission[scols].to_csv('submission_final.csv', index=False)
+
+
+
